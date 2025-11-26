@@ -1,0 +1,170 @@
+/*********************************************************************
+ * DF Pong Controller - "Eclipse Controller"
+ * 
+ * Movement Values:
+ * 0 = No movement / Neutral position
+ * 1 = UP movement   (cover left → up)
+ * 2 = DOWN movement (cover right → down)
+ * 3 = Handshake signal (used by BLE template)
+ *********************************************************************/
+
+#include <ArduinoBLE.h>
+#include "ble_functions.h"
+#include "buzzer_functions.h"
+
+// ============================================
+// IMPORTANT: SET YOUR DEVICE NUMBER HERE (1-25)
+// ============================================
+const int DEVICE_NUMBER = 16;  // 
+// ============================================
+
+// Device name is generated from device number
+String deviceNameStr = "DFPONG-" + String(DEVICE_NUMBER);
+const char* deviceName = deviceNameStr.c_str();
+
+// Pin definitions
+const int BUZZER_PIN = 11;         // Buzzer
+const int LED_PIN    = LED_BUILTIN;
+
+// 光敏电阻引脚：左孔 = UP，右孔 = DOWN
+const int LDR_LEFT_PIN  = A7;
+const int LDR_RIGHT_PIN = A6;
+
+// ---------- Movement state ----------
+int currentMovement = 0;           // 0=none, 1=up, 2=down, 3=handshake
+
+// ---------- Light sensor smoothing (rolling average) ----------
+const int LIGHT_AVG_WINDOW     = 10;   // window size
+const int EQUALITY_THRESHOLD   = 50;   // if less than this, NONE
+const unsigned int READ_INTERVAL_MS = 40;
+
+int  lightReadingsLeft[LIGHT_AVG_WINDOW];
+int  lightReadingsRight[LIGHT_AVG_WINDOW];
+long totalLeft  = 0;
+long totalRight = 0;
+int  avgIndex   = 0;
+
+int  smoothedLeft  = 0;
+int  smoothedRight = 0;
+
+unsigned long lastReadTime = 0;
+
+
+// =================== Helper Functions ===================
+
+//  
+void initLightAverages() {
+  for (int i = 0; i < LIGHT_AVG_WINDOW; i++) {
+    lightReadingsLeft[i]  = 0;
+    lightReadingsRight[i] = 0;
+  }
+  totalLeft = 0;
+  totalRight = 0;
+  avgIndex = 0;
+  smoothedLeft = smoothedRight = 0;
+}
+
+//  rolling average
+void updateLightAverages(int newLeft, int newRight) {
+  // left sensor
+  totalLeft -= lightReadingsLeft[avgIndex];
+  lightReadingsLeft[avgIndex] = newLeft;
+  totalLeft += newLeft;
+
+  // right sensor
+  totalRight -= lightReadingsRight[avgIndex];
+  lightReadingsRight[avgIndex] = newRight;
+  totalRight += newRight;
+
+  avgIndex = (avgIndex + 1) % LIGHT_AVG_WINDOW;
+
+  smoothedLeft  = totalLeft  / LIGHT_AVG_WINDOW;
+  smoothedRight = totalRight / LIGHT_AVG_WINDOW;
+}
+
+//  currentMovement
+void updateMovementFromLight() {
+  int diff = smoothedLeft - smoothedRight;   // left - right
+
+  if (abs(diff) < EQUALITY_THRESHOLD) {
+    currentMovement = 0;              // almost same → none
+  } 
+  else if (diff < -EQUALITY_THRESHOLD) {
+    currentMovement = 1;              // left obviously darker → cover left → UP
+  } 
+  else { // diff > EQUALITY_THRESHOLD
+    currentMovement = 2;              // right obviously darker → cover right → DOWN
+  }
+
+  // 
+  Serial.print("L=");
+  Serial.print(smoothedLeft);
+  Serial.print("  R=");
+  Serial.print(smoothedRight);
+  Serial.print("  diff=");
+  Serial.print(diff);
+  Serial.print("  move=");
+  Serial.println(currentMovement);
+}
+
+
+// =================== Arduino Core ===================
+
+void setup() 
+{
+  Serial.begin(9600);
+  delay(500);
+  Serial.println("=== DF Pong Eclipse Controller Starting ===");
+
+  pinMode(LED_PIN, OUTPUT);
+
+  // initialize BLE
+  setupBLE(deviceName, DEVICE_NUMBER, LED_PIN);
+
+  // initialize buzzer
+  setupBuzzer(BUZZER_PIN);
+
+  // initialize light average
+  initLightAverages();
+
+  // A6A7 Input
+  pinMode(LDR_LEFT_PIN,  INPUT);
+  pinMode(LDR_RIGHT_PIN, INPUT);
+}
+
+void loop() 
+{
+  // obtain BLE 
+  updateBLE();
+
+  // read sensor and update currentMovement
+  handleInput();
+
+  // send currentMovement to Pong
+  sendMovement(currentMovement);
+
+  // play different buzzer reaction according to currentMovement 
+  updateBuzzer(currentMovement);
+}
+
+
+// =================== function I modified ===================
+
+void handleInput() 
+{
+  unsigned long now = millis();
+  if (now - lastReadTime < READ_INTERVAL_MS) {
+    return;    // Control the sampling frequency to avoid excessive frequency
+  }
+  lastReadTime = now;
+
+  // 1. Read two photoresistors
+  int rawLeft  = analogRead(LDR_LEFT_PIN);
+  int rawRight = analogRead(LDR_RIGHT_PIN);
+
+  // 2. update rolling average
+  updateLightAverages(rawLeft, rawRight);
+
+  // 3. Determine currentMovement based on which of the two light paths is darker
+  updateMovementFromLight();
+}
